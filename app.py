@@ -1,12 +1,8 @@
 import streamlit as st
-import pdfplumber
 import sqlite3
 import json
-import io
-from datetime import datetime
-from PIL import Image
-import pytesseract
 from openai import OpenAI
+import base64
 
 # --- CONFIG ---
 DB_PATH = "invoice_ledger.db"
@@ -32,11 +28,6 @@ def init_db():
     )
     """)
     conn.commit()
-    # Add business_name if missing (for backward compatibility)
-    existing_cols = [r[1] for r in c.execute("PRAGMA table_info(ledger)")]
-    if "business_name" not in existing_cols:
-        c.execute("ALTER TABLE ledger ADD COLUMN business_name TEXT;")
-        conn.commit()
     return conn
 
 
@@ -72,81 +63,39 @@ def delete_invoice(conn, row_id):
     conn.commit()
 
 
-# --- PDF Extraction ---
-def extract_text(pdf_bytes):
-    text = ""
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text += page_text + "\n"
-    return text.strip()
-
-
-def ocr_fallback(pdf_bytes):
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        text = ""
-        for page in pdf.pages:
-            im = page.to_image(resolution=300).original
-            text += pytesseract.image_to_string(im)
-    return text.strip()
-
-
-# --- LLM Prompt ---
-def build_prompt(invoice_text):
-    example_invoice = """
-EXAMPLE INVOICE:
-Supplier: Fancy Packaging Co.
-Invoice No: INV-2024-701
-Invoice Date: 2025-07-05
-Due Date: 2025-07-20
-GSTIN (Seller): 07ABCDE1234F1Z5
-Buyer GSTIN (SKINNCELL): 36ABCCS0157Q1ZY
-Taxable Value: ₹7,500.00
-CGST 9%: ₹675.00
-SGST 9%: ₹675.00
-Total Amount: ₹8,850.00
-Category: Packaging
-"""
-    return f"""
-You are an expert invoice parser for Indian GST invoices.
+# --- Prompt Builder ---
+def build_prompt():
+    return """
+You are an expert invoice parser for Indian business invoices.
 
 Each invoice will have **two GSTINs**:
 1. The buyer GSTIN — SKINNCELL (GSTIN: 36ABCCS0157Q1ZY)
-2. The seller GSTIN — belongs to the vendor issuing the invoice
+2. The seller GSTIN — belongs to the vendor issuing the invoice.
 
 ➡️ Always extract the SELLER's details (ignore SKINNCELL’s GSTIN).
 
-Your task: return a strict JSON object with the following keys:
+Return your output as a single JSON object with the following fields:
 
-date_of_invoice (YYYY-MM-DD or null)
-due_date (YYYY-MM-DD or null)
-business_name (seller's business name)
-gst_no (SELLER's GSTIN, not SKINNCELL's)
-category (e.g., Packaging, Shipping, Marketing, Office Supplies, Other)
-amount_without_tax (numeric)
-total_amount (numeric)
-confidence (0.0-1.0, optional)
+{
+  "date_of_invoice": "YYYY-MM-DD or null",
+  "due_date": "YYYY-MM-DD or null",
+  "business_name": "seller's business name",
+  "gst_no": "SELLER GSTIN (not SKINNCELL's)",
+  "category": "Packaging, Shipping, Marketing, Office Supplies, Other",
+  "amount_without_tax": number,
+  "total_amount": number,
+  "confidence": number (0.0 - 1.0)
+}
 
 Rules:
-- Only include the SELLER’s GSTIN, not the buyer (ignore 36ABCCS0157Q1ZY).
-- "business_name" is the seller’s name as written in the invoice header or near GSTIN.
-- Output ONLY JSON, no markdown or explanations.
-- If a field is missing, return null.
-- All numeric values must be numeric.
-
-Example invoice:
-{example_invoice}
-
-Now extract details from this invoice:
-
-INVOICE TEXT:
-{invoice_text}
-END
+- Only include the seller's GSTIN, not the buyer (ignore 36ABCCS0157Q1ZY).
+- Parse invoice date and due date carefully.
+- Output *only* the JSON, no markdown or commentary.
 """
 
 
 # --- Streamlit UI ---
-st.title("📄 Invoice Parser (Streamlit + SQLite)")
+st.title("📄 Invoice Parser (GPT-only, No OCR/Plumber)")
 
 st.sidebar.header("🔑 OpenAI API Key")
 api_key = st.sidebar.text_input("Enter your OpenAI API key", type="password")
@@ -164,28 +113,43 @@ uploaded_file = st.file_uploader("Upload a single-page invoice PDF", type=["pdf"
 
 if uploaded_file and st.button("Parse Invoice"):
     pdf_bytes = uploaded_file.read()
-    st.info(f"Processing: {uploaded_file.name}")
 
-    # Extract text
-    text = extract_text(pdf_bytes)
-    if not text:
-        st.write("Trying OCR...")
-        text = ocr_fallback(pdf_bytes)
+    # Convert PDF to base64 string
+    encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
-    st.text_area("Extracted Text (preview)", text[:2000], height=200)
-
-    # Parse via OpenAI
-    with st.spinner("Parsing invoice using OpenAI..."):
-        prompt = build_prompt(text)
+    with st.spinner("Parsing invoice with GPT..."):
         try:
+            prompt = build_prompt()
+
+            # Send PDF directly to GPT
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Return only JSON."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "You are a professional invoice data extractor."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "input_file",
+                                "input_file": {
+                                    "data": encoded_pdf,
+                                    "mime_type": "application/pdf",
+                                    "name": uploaded_file.name
+                                }
+                            }
+                        ]
+                    }
                 ],
                 temperature=0
             )
+
             content = response.choices[0].message.content.strip()
         except Exception as e:
             st.error(f"OpenAI API error: {e}")
@@ -198,17 +162,17 @@ if uploaded_file and st.button("Parse Invoice"):
     try:
         parsed = json.loads(content)
     except:
-        match = re.search(r"\{[\s\S]*\}", content)
-        parsed = json.loads(match.group(0)) if match else {}
+        st.error("Failed to parse JSON from GPT response.")
+        st.text(content)
+        st.stop()
 
-    # Automatic post-validation: remove SKINNCELL GSTIN if wrongly picked
+    # Safety: ignore SKINNCELL GSTIN
     if parsed.get("gst_no") == "36ABCCS0157Q1ZY":
         parsed["gst_no"] = None
 
     st.json(parsed)
     save_invoice(conn, {**parsed, "raw_json": parsed})
     st.success("Saved to ledger ✅")
-
 
 # --- Ledger Table ---
 st.header("🧾 Ledger")
@@ -217,18 +181,26 @@ rows = get_all_invoices(conn)
 if not rows:
     st.info("No invoices parsed yet.")
 else:
-    st.write("Below is your saved invoice ledger:")
+    import pandas as pd
+    df = pd.DataFrame([
+        {
+            "ID": r["id"],
+            "Date": r["date_of_invoice"],
+            "Due": r["due_date"],
+            "Business Name": r["business_name"],
+            "GSTIN": r["gst_no"],
+            "Category": r["category"],
+            "Subtotal": r["amount_without_tax"],
+            "Total": r["total_amount"],
+            "Confidence": r["confidence"]
+        }
+        for r in rows
+    ])
 
-    # Create a clean table with delete buttons
-    for i, r in enumerate(rows):
-        cols = st.columns([1, 1, 2, 2, 1, 1, 1, 1])
-        cols[0].write(r["date_of_invoice"] or "-")
-        cols[1].write(r["due_date"] or "-")
-        cols[2].write(r["business_name"] or "-")
-        cols[3].write(r["gst_no"] or "-")
-        cols[4].write(r["category"] or "-")
-        cols[5].write(r["amount_without_tax"] or "-")
-        cols[6].write(r["total_amount"] or "-")
-        if cols[7].button("🗑️ Delete", key=f"del-{r['id']}"):
-            delete_invoice(conn, r["id"])
+    for idx, row in df.iterrows():
+        cols = st.columns(len(df.columns) + 1)
+        for i, c in enumerate(df.columns):
+            cols[i].write(row[c] if row[c] not in [None, ""] else "-")
+        if cols[len(df.columns)].button("🗑️ Delete", key=f"del-{row['ID']}"):
+            delete_invoice(conn, row["ID"])
             st.experimental_rerun()
