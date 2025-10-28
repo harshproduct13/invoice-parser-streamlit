@@ -1,7 +1,6 @@
 import streamlit as st
 import sqlite3
 import json
-import base64
 import pandas as pd
 from openai import OpenAI
 
@@ -116,7 +115,17 @@ uploaded_file = st.file_uploader("Upload a single-page invoice PDF", type=["pdf"
 
 if uploaded_file and st.button("Parse Invoice"):
     pdf_bytes = uploaded_file.read()
-    encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+
+    with st.spinner("Uploading PDF to OpenAI..."):
+        try:
+            uploaded = client.files.create(
+                file=(uploaded_file.name, pdf_bytes, "application/pdf"),
+                purpose="assistants"
+            )
+            file_id = uploaded.id
+        except Exception as e:
+            st.error(f"File upload failed: {e}")
+            st.stop()
 
     with st.spinner("Parsing invoice with GPT..."):
         try:
@@ -131,24 +140,13 @@ if uploaded_file and st.button("Parse Invoice"):
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "file",
-                                "file": {
-                                    "name": uploaded_file.name,
-                                    "mime_type": "application/pdf",
-                                    "data": encoded_pdf
-                                }
-                            }
+                            {"type": "text", "text": prompt},
+                            {"type": "file", "file_id": file_id}
                         ]
                     }
                 ],
                 temperature=0
             )
-
             content = response.choices[0].message.content.strip()
 
         except Exception as e:
@@ -196,13 +194,11 @@ else:
         for r in rows
     ])
 
-    # Table header
     st.markdown("### Parsed Invoices")
     header_cols = st.columns(len(df.columns) + 1)
     for i, col_name in enumerate(df.columns):
         header_cols[i].markdown(f"**{col_name}**")
 
-    # Data rows with delete button
     for idx, row in df.iterrows():
         cols = st.columns(len(df.columns) + 1)
         for i, c in enumerate(df.columns):
