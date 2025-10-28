@@ -16,7 +16,6 @@ st.set_page_config(page_title="Invoice Parser", layout="wide")
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
-    # ✅ Added business_name column
     c.execute("""
     CREATE TABLE IF NOT EXISTS ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,13 +32,11 @@ def init_db():
     )
     """)
     conn.commit()
-
-    # Ensure backward compatibility (add business_name column if missing)
+    # Add business_name if missing (for backward compatibility)
     existing_cols = [r[1] for r in c.execute("PRAGMA table_info(ledger)")]
     if "business_name" not in existing_cols:
         c.execute("ALTER TABLE ledger ADD COLUMN business_name TEXT;")
         conn.commit()
-
     return conn
 
 
@@ -110,7 +107,6 @@ SGST 9%: ₹675.00
 Total Amount: ₹8,850.00
 Category: Packaging
 """
-
     return f"""
 You are an expert invoice parser for Indian GST invoices.
 
@@ -120,7 +116,7 @@ Each invoice will have **two GSTINs**:
 
 ➡️ Always extract the SELLER's details (ignore SKINNCELL’s GSTIN).
 
-Your task: return a strict JSON object with these keys:
+Your task: return a strict JSON object with the following keys:
 
 date_of_invoice (YYYY-MM-DD or null)
 due_date (YYYY-MM-DD or null)
@@ -214,40 +210,25 @@ if uploaded_file and st.button("Parse Invoice"):
     st.success("Saved to ledger ✅")
 
 
-# --- Ledger UI ---
+# --- Ledger Table ---
 st.header("🧾 Ledger")
 rows = get_all_invoices(conn)
 
 if not rows:
     st.info("No invoices parsed yet.")
 else:
-    for r in rows:
-        col1, col2, col3 = st.columns([7, 2, 1])
-        with col1:
-            st.markdown(f"""
-            **{r['business_name'] or 'Unknown Vendor'}**  
-            📅 *{r['date_of_invoice'] or '-'}* → 💰 ₹{r['total_amount'] or '-'}  
-            🧾 GSTIN: `{r['gst_no'] or '-'}`  
-            🏷️ Category: {r['category'] or '-'}
-            """)
-        with col2:
-            st.write("")
-        with col3:
-            if st.button("🗑️ Delete", key=f"del-{r['id']}"):
-                delete_invoice(conn, r["id"])
-                st.experimental_rerun()
+    st.write("Below is your saved invoice ledger:")
 
-    st.divider()
-    st.dataframe([
-        {
-            "Date": r["date_of_invoice"],
-            "Due": r["due_date"],
-            "Business Name": r["business_name"],
-            "GSTIN": r["gst_no"],
-            "Category": r["category"],
-            "Subtotal": r["amount_without_tax"],
-            "Total": r["total_amount"],
-            "Confidence": r["confidence"]
-        }
-        for r in rows
-    ])
+    # Create a clean table with delete buttons
+    for i, r in enumerate(rows):
+        cols = st.columns([1, 1, 2, 2, 1, 1, 1, 1])
+        cols[0].write(r["date_of_invoice"] or "-")
+        cols[1].write(r["due_date"] or "-")
+        cols[2].write(r["business_name"] or "-")
+        cols[3].write(r["gst_no"] or "-")
+        cols[4].write(r["category"] or "-")
+        cols[5].write(r["amount_without_tax"] or "-")
+        cols[6].write(r["total_amount"] or "-")
+        if cols[7].button("🗑️ Delete", key=f"del-{r['id']}"):
+            delete_invoice(conn, r["id"])
+            st.experimental_rerun()
