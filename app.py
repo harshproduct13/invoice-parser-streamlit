@@ -8,7 +8,7 @@ from openai import OpenAI
 DB_PATH = "invoice_ledger.db"
 st.set_page_config(page_title="Invoice Parser (GPT-only)", layout="wide")
 
-# --- Initialize DB ---
+# --- Initialize SQLite Database ---
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
@@ -63,7 +63,7 @@ def delete_invoice(conn, row_id):
     conn.commit()
 
 
-# --- Prompt ---
+# --- Prompt Template ---
 def build_prompt():
     return """
 You are an expert invoice parser for Indian business invoices.
@@ -95,6 +95,7 @@ Rules:
 - All numeric values must be numbers.
 """
 
+
 # --- Streamlit UI ---
 st.title("📄 Invoice Parser (GPT-only, SQLite Ledger)")
 
@@ -115,7 +116,7 @@ uploaded_file = st.file_uploader("Upload a single-page invoice PDF", type=["pdf"
 if uploaded_file and st.button("Parse Invoice"):
     pdf_bytes = uploaded_file.read()
 
-    with st.spinner("Uploading PDF to OpenAI..."):
+    with st.spinner("📤 Uploading PDF to OpenAI..."):
         try:
             uploaded = client.files.create(
                 file=(uploaded_file.name, pdf_bytes, "application/pdf"),
@@ -126,7 +127,7 @@ if uploaded_file and st.button("Parse Invoice"):
             st.error(f"File upload failed: {e}")
             st.stop()
 
-    with st.spinner("Parsing invoice with GPT..."):
+    with st.spinner("🤖 Parsing invoice with GPT..."):
         try:
             prompt = build_prompt()
             response = client.responses.create(
@@ -156,16 +157,18 @@ if uploaded_file and st.button("Parse Invoice"):
     try:
         parsed = json.loads(content)
     except:
-        st.error("Failed to parse JSON from GPT response.")
+        st.error("❌ Failed to parse JSON from GPT response.")
         st.text(content)
         st.stop()
 
+    # Remove SKINNCELL GSTIN if GPT mistakenly outputs it
     if parsed.get("gst_no") == "36ABCCS0157Q1ZY":
         parsed["gst_no"] = None
 
     st.json(parsed)
     save_invoice(conn, {**parsed, "raw_json": parsed})
-    st.success("Saved to ledger ✅")
+    st.success("✅ Invoice saved to ledger.")
+
 
 # --- Ledger Table ---
 st.header("🧾 Ledger")
@@ -194,10 +197,14 @@ else:
     for i, col_name in enumerate(df.columns):
         header_cols[i].markdown(f"**{col_name}**")
 
+    # Data rows with delete buttons
     for idx, row in df.iterrows():
         cols = st.columns(len(df.columns) + 1)
         for i, c in enumerate(df.columns):
             cols[i].write(row[c] if row[c] not in [None, ""] else "-")
         if cols[len(df.columns)].button("🗑️ Delete", key=f"del-{row['ID']}"):
             delete_invoice(conn, row["ID"])
-            st.experimental_rerun()
+            try:
+                st.rerun()
+            except AttributeError:
+                st.experimental_rerun()
