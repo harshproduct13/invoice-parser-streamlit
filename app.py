@@ -1,12 +1,13 @@
 import streamlit as st
 import sqlite3
 import json
-from openai import OpenAI
 import base64
+import pandas as pd
+from openai import OpenAI
 
 # --- CONFIG ---
 DB_PATH = "invoice_ledger.db"
-st.set_page_config(page_title="Invoice Parser", layout="wide")
+st.set_page_config(page_title="Invoice Parser (GPT-only)", layout="wide")
 
 # --- Initialize DB ---
 def init_db():
@@ -63,7 +64,7 @@ def delete_invoice(conn, row_id):
     conn.commit()
 
 
-# --- Prompt Builder ---
+# --- Prompt Template ---
 def build_prompt():
     return """
 You are an expert invoice parser for Indian business invoices.
@@ -89,13 +90,15 @@ Return your output as a single JSON object with the following fields:
 
 Rules:
 - Only include the seller's GSTIN, not the buyer (ignore 36ABCCS0157Q1ZY).
-- Parse invoice date and due date carefully.
-- Output *only* the JSON, no markdown or commentary.
+- "business_name" is the seller’s name as written in the invoice header or near GSTIN.
+- Output ONLY JSON, no markdown or explanations.
+- If a field is missing, return null.
+- All numeric values must be numbers.
 """
 
 
 # --- Streamlit UI ---
-st.title("📄 Invoice Parser (GPT-only, No OCR/Plumber)")
+st.title("📄 Invoice Parser (GPT-only, SQLite Ledger)")
 
 st.sidebar.header("🔑 OpenAI API Key")
 api_key = st.sidebar.text_input("Enter your OpenAI API key", type="password")
@@ -113,15 +116,11 @@ uploaded_file = st.file_uploader("Upload a single-page invoice PDF", type=["pdf"
 
 if uploaded_file and st.button("Parse Invoice"):
     pdf_bytes = uploaded_file.read()
-
-    # Convert PDF to base64 string
     encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
 
     with st.spinner("Parsing invoice with GPT..."):
         try:
             prompt = build_prompt()
-
-            # Send PDF directly to GPT
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -137,11 +136,11 @@ if uploaded_file and st.button("Parse Invoice"):
                                 "text": prompt
                             },
                             {
-                                "type": "input_file",
-                                "input_file": {
-                                    "data": encoded_pdf,
+                                "type": "file",
+                                "file": {
+                                    "name": uploaded_file.name,
                                     "mime_type": "application/pdf",
-                                    "name": uploaded_file.name
+                                    "data": encoded_pdf
                                 }
                             }
                         ]
@@ -151,6 +150,7 @@ if uploaded_file and st.button("Parse Invoice"):
             )
 
             content = response.choices[0].message.content.strip()
+
         except Exception as e:
             st.error(f"OpenAI API error: {e}")
             st.stop()
@@ -166,7 +166,7 @@ if uploaded_file and st.button("Parse Invoice"):
         st.text(content)
         st.stop()
 
-    # Safety: ignore SKINNCELL GSTIN
+    # Remove SKINNCELL GSTIN if GPT mistakenly outputs it
     if parsed.get("gst_no") == "36ABCCS0157Q1ZY":
         parsed["gst_no"] = None
 
@@ -181,7 +181,6 @@ rows = get_all_invoices(conn)
 if not rows:
     st.info("No invoices parsed yet.")
 else:
-    import pandas as pd
     df = pd.DataFrame([
         {
             "ID": r["id"],
@@ -197,6 +196,13 @@ else:
         for r in rows
     ])
 
+    # Table header
+    st.markdown("### Parsed Invoices")
+    header_cols = st.columns(len(df.columns) + 1)
+    for i, col_name in enumerate(df.columns):
+        header_cols[i].markdown(f"**{col_name}**")
+
+    # Data rows with delete button
     for idx, row in df.iterrows():
         cols = st.columns(len(df.columns) + 1)
         for i, c in enumerate(df.columns):
