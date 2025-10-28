@@ -3,10 +3,10 @@ import pdfplumber
 import sqlite3
 import json
 import io
-import openai
 from datetime import datetime
 from PIL import Image
 import pytesseract
+from openai import OpenAI  # ✅ new import
 
 # --- CONFIG ---
 DB_PATH = "invoice_ledger.db"
@@ -113,6 +113,7 @@ st.title("📄 Invoice Parser (Streamlit + SQLite)")
 
 st.sidebar.header("🔑 OpenAI API Key")
 api_key = st.sidebar.text_input("Enter your OpenAI API key", type="password")
+
 if not api_key and "openai_api_key" in st.secrets:
     api_key = st.secrets["openai_api_key"]
 
@@ -120,7 +121,10 @@ if not api_key:
     st.warning("Please provide your OpenAI API key in the sidebar or Streamlit secrets.")
     st.stop()
 
-openai.api_key = api_key
+# ✅ new client initialization for OpenAI SDK v1.x
+client = OpenAI(api_key=api_key)
+
+# Initialize DB
 conn = init_db()
 
 uploaded_file = st.file_uploader("Upload a single-page invoice PDF", type=["pdf"])
@@ -129,6 +133,7 @@ if uploaded_file and st.button("Parse Invoice"):
     pdf_bytes = uploaded_file.read()
     st.info(f"Processing: {uploaded_file.name}")
 
+    # Step 1: Extract text
     text = extract_text(pdf_bytes)
     if not text:
         st.write("Trying OCR...")
@@ -136,10 +141,11 @@ if uploaded_file and st.button("Parse Invoice"):
 
     st.text_area("Extracted Text (preview)", text[:2000], height=200)
 
+    # Step 2: Call OpenAI
     with st.spinner("Parsing invoice using OpenAI..."):
         prompt = build_prompt(text)
         try:
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(  # ✅ updated API call
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "Return only JSON."},
@@ -152,6 +158,7 @@ if uploaded_file and st.button("Parse Invoice"):
             st.error(f"OpenAI API error: {e}")
             st.stop()
 
+    # Step 3: Clean + parse JSON
     import re
     if content.startswith("```"):
         content = re.sub(r"```(json)?", "", content).strip().strip("`")
@@ -161,13 +168,17 @@ if uploaded_file and st.button("Parse Invoice"):
     except:
         match = re.search(r"\{[\s\S]*\}", content)
         parsed = json.loads(match.group(0)) if match else {}
-    
+
     st.json(parsed)
+
+    # Step 4: Save to DB
     save_invoice(conn, {**parsed, "raw_json": parsed})
     st.success("Saved to ledger ✅")
 
+# Step 5: Show Ledger
 st.header("🧾 Ledger")
 rows = get_all_invoices(conn)
+
 if not rows:
     st.info("No invoices parsed yet.")
 else:
