@@ -63,7 +63,7 @@ def delete_invoice(conn, row_id):
     conn.commit()
 
 
-# --- Prompt Template ---
+# --- Prompt ---
 def build_prompt():
     return """
 You are an expert invoice parser for Indian business invoices.
@@ -94,7 +94,6 @@ Rules:
 - If a field is missing, return null.
 - All numeric values must be numbers.
 """
-
 
 # --- Streamlit UI ---
 st.title("📄 Invoice Parser (GPT-only, SQLite Ledger)")
@@ -130,24 +129,21 @@ if uploaded_file and st.button("Parse Invoice"):
     with st.spinner("Parsing invoice with GPT..."):
         try:
             prompt = build_prompt()
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a professional invoice data extractor."
-                    },
+            response = client.responses.create(
+                model="gpt-4.1-mini",
+                input=[
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "file", "file_id": file_id}
-                        ]
+                            {"type": "input_text", "text": prompt},
+                            {"type": "input_file", "file_id": file_id}
+                        ],
                     }
                 ],
                 temperature=0
             )
-            content = response.choices[0].message.content.strip()
+
+            content = response.output_text.strip()
 
         except Exception as e:
             st.error(f"OpenAI API error: {e}")
@@ -164,7 +160,6 @@ if uploaded_file and st.button("Parse Invoice"):
         st.text(content)
         st.stop()
 
-    # Remove SKINNCELL GSTIN if GPT mistakenly outputs it
     if parsed.get("gst_no") == "36ABCCS0157Q1ZY":
         parsed["gst_no"] = None
 
